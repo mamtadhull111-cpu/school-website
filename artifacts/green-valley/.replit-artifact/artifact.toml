@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Green Valley Public School"
+version = "1.0.0"
+id = "artifacts/green-valley"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22799
+
+[services.development]
+run = "pnpm --filter @workspace/green-valley run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/green-valley", "run", "build" ]
+publicDir = "artifacts/green-valley/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22799"
+BASE_PATH = "/"
