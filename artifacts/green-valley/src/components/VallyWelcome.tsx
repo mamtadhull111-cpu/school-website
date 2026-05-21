@@ -107,18 +107,17 @@ const TOUR_STEPS = [
   },
 ];
 
-const SCROLL_DURATION_MS = 13000; // scroll the full page slowly over 13 seconds
+const WPM = 140; // words-per-minute estimate used when audio duration is unknown
 
 /* ─── Component ─────────────────────────────────────────────────────────── */
 interface Props { onTourStart: () => void; onTourEnd: () => void; }
 
 export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
-  const [phase,           setPhase]          = useState<Phase>("idle");
-  const [visible,         setVisible]        = useState(false);
-  const [tourStep,        setTourStep]       = useState(0);
-  const [lang,            setLang]           = useState<Lang>("en");
-  const [muted,           setMuted]          = useState(false);
-  const [currentWordIdx,  setCurrentWordIdx] = useState(-1);
+  const [phase,    setPhase]    = useState<Phase>("idle");
+  const [visible,  setVisible]  = useState(false);
+  const [tourStep, setTourStep] = useState(0);
+  const [lang,     setLang]     = useState<Lang>("en");
+  const [muted,    setMuted]    = useState(false);
   const navigate = useNavigate();
 
   /* Refs for use inside async / rAF callbacks (avoid stale closures) */
@@ -133,8 +132,7 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
   const scriptBoxRef     = useRef<HTMLDivElement>(null);
   const currentAudioRef  = useRef<HTMLAudioElement | null>(null);
   const preloadRef       = useRef<Promise<HTMLAudioElement | null> | null>(null);
-  const pausedTimeRef    = useRef<number>(0);
-  const currentWordIdxRef = useRef<number>(-1);
+  const pausedTimeRef = useRef<number>(0);
 
   const stopSpeech = () => {
     if (currentAudioRef.current) {
@@ -183,12 +181,12 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     stopSpeech();
   };
 
-  const startScrollAnim = () => {
+  const startScrollAnim = (durationMs: number) => {
     cancelAnimationFrame(scrollId.current);
     const t0 = Date.now();
     const tick = () => {
       const elapsed  = Date.now() - t0;
-      const progress = Math.min(elapsed / SCROLL_DURATION_MS, 1);
+      const progress = Math.min(elapsed / durationMs, 1);
       const maxY     = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
       if (maxY > 0) window.scrollTo(0, maxY * progress);
       if (progress < 1) scrollId.current = requestAnimationFrame(tick);
@@ -196,7 +194,7 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     scrollId.current = requestAnimationFrame(tick);
   };
 
-  const startScriptScrollAnim = () => {
+  const startScriptScrollAnim = (durationMs: number) => {
     cancelAnimationFrame(scriptScrollId.current);
     /* Wait one frame so the new text is rendered and scrollHeight is correct */
     scriptScrollId.current = requestAnimationFrame(() => {
@@ -204,8 +202,8 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
       if (!box) return;
       const t0 = Date.now();
       const tick = () => {
-        const elapsed  = Date.now() - t0;
-        const progress = Math.min(elapsed / SCROLL_DURATION_MS, 1);
+        const elapsed   = Date.now() - t0;
+        const progress  = Math.min(elapsed / durationMs, 1);
         const maxScroll = box.scrollHeight - box.clientHeight;
         if (maxScroll > 0) box.scrollTop = maxScroll * progress;
         if (progress < 1) scriptScrollId.current = requestAnimationFrame(tick);
@@ -221,8 +219,6 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     setTourStep(step);
     tourStepRef.current = step;
     setVisible(false);
-    setCurrentWordIdx(-1);
-    currentWordIdxRef.current = -1;
 
     const text    = s.text[langRef.current];
     const isMuted = mutedRef.current;
@@ -246,10 +242,16 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
           return;
         }
 
-        /* Show tour overlay and start scroll exactly when audio is ready */
+        /* Compute how long this step takes so scroll matches audio exactly */
+        const wordCount = text.split(/\s+/).length;
+        const stepDurationMs = (audio && !isNaN(audio.duration) && audio.duration > 0)
+          ? audio.duration * 1000
+          : Math.max(Math.round((wordCount / WPM) * 60000), 4500);
+
+        /* Show tour overlay and start both scrolls with step-specific duration */
         setVisible(true);
-        startScrollAnim();
-        startScriptScrollAnim();
+        startScrollAnim(stepDurationMs);
+        startScriptScrollAnim(stepDurationMs);
 
         if (!isMuted) {
           if (!audio) {
@@ -263,21 +265,6 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
             return;
           }
           currentAudioRef.current = audio;
-
-          /* ── word-by-word highlight via timeupdate ── */
-          const words = text.split(/\s+/);
-          audio.ontimeupdate = () => {
-            if (audio.duration > 0) {
-              const idx = Math.min(
-                Math.floor((audio.currentTime / audio.duration) * words.length),
-                words.length - 1,
-              );
-              if (idx !== currentWordIdxRef.current) {
-                currentWordIdxRef.current = idx;
-                setCurrentWordIdx(idx);
-              }
-            }
-          };
 
           audio.onended = () => {
             currentAudioRef.current = null;
@@ -307,15 +294,13 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
             }, 5000);
           });
         } else {
-          /* Muted → auto-advance after estimated reading time */
-          const words    = text.split(/\s+/).length;
-          const readTime = Math.max(Math.round((words / 140) * 60000), 4500);
+          /* Muted → auto-advance after same duration used for scroll */
           autoTimer.current = setTimeout(() => {
             if (phaseRef.current !== "tour") return;
             const next = tourStepRef.current + 1;
             if (next >= TOUR_STEPS.length) doEndTour();
             else runStep(next);
-          }, readTime);
+          }, stepDurationMs);
         }
       });
     }, 200);
@@ -605,20 +590,7 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
                 className="overflow-y-auto pr-1 text-sm text-foreground leading-relaxed"
                 style={{ maxHeight: "160px" }}
               >
-                {TOUR_STEPS[tourStep].text[lang].split(/\s+/).map((word, i) => (
-                  <span
-                    key={i}
-                    style={{
-                      backgroundColor: i <= currentWordIdx ? "hsl(var(--primary) / 0.15)" : "transparent",
-                      color:            i <= currentWordIdx ? "hsl(var(--primary))"          : "inherit",
-                      borderRadius: "3px",
-                      padding: "0 1px",
-                      transition: "background-color 0.2s, color 0.2s",
-                    }}
-                  >
-                    {word}{" "}
-                  </span>
-                ))}
+                {TOUR_STEPS[tourStep].text[lang]}
               </div>
             </div>
 
