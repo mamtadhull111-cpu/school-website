@@ -7,7 +7,7 @@ const robotImg  = `${BASE_PATH}/vally-robot.png`;
 const STORAGE_KEY = "gvps_vally_v2";
 const BASE_URL = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 
-function fetchTTSAudio(text: string, language = "en"): Promise<HTMLAudioElement | null> {
+function fetchFromTTSApi(text: string, language = "en"): Promise<HTMLAudioElement | null> {
   return fetch(`${BASE_URL}/api/tts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -20,6 +20,20 @@ function fetchTTSAudio(text: string, language = "en"): Promise<HTMLAudioElement 
       return audio;
     })
     .catch(() => null);
+}
+
+function fetchTTSAudio(text: string, language = "en", stepIndex?: number): Promise<HTMLAudioElement | null> {
+  if (stepIndex !== undefined) {
+    const staticUrl = `${BASE_PATH}/audio/tour-${stepIndex}-${language}.mp3`;
+    return fetch(staticUrl)
+      .then(res => {
+        if (!res.ok) throw new Error("not found");
+        const audio = new Audio(staticUrl);
+        return audio as HTMLAudioElement;
+      })
+      .catch(() => fetchFromTTSApi(text, language));
+  }
+  return fetchFromTTSApi(text, language);
 }
 
 type Lang  = "en" | "hi";
@@ -202,7 +216,7 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
       ? Promise.resolve(null)
       : (step === 0 && preloadRef.current)
         ? (() => { const p = preloadRef.current!; preloadRef.current = null; return p; })()
-        : fetchTTSAudio(text, langRef.current);
+        : fetchTTSAudio(text, langRef.current, step);
 
     setTimeout(() => {
       navigateRef.current(s.path);
@@ -313,6 +327,7 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
         preloadRef.current = fetchTTSAudio(
           TOUR_STEPS[0].text[langRef.current],
           langRef.current,
+          0,
         );
       }
     }, 700);
