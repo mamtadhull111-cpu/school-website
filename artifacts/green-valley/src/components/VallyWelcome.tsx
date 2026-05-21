@@ -113,11 +113,12 @@ const SCROLL_DURATION_MS = 13000; // scroll the full page slowly over 13 seconds
 interface Props { onTourStart: () => void; onTourEnd: () => void; }
 
 export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
-  const [phase,    setPhase]    = useState<Phase>("idle");
-  const [visible,  setVisible]  = useState(false);
-  const [tourStep, setTourStep] = useState(0);
-  const [lang,     setLang]     = useState<Lang>("en");
-  const [muted,    setMuted]    = useState(false);
+  const [phase,           setPhase]          = useState<Phase>("idle");
+  const [visible,         setVisible]        = useState(false);
+  const [tourStep,        setTourStep]       = useState(0);
+  const [lang,            setLang]           = useState<Lang>("en");
+  const [muted,           setMuted]          = useState(false);
+  const [currentWordIdx,  setCurrentWordIdx] = useState(-1);
   const navigate = useNavigate();
 
   /* Refs for use inside async / rAF callbacks (avoid stale closures) */
@@ -128,15 +129,28 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
   const scrollId       = useRef<number>(0);
   const scriptScrollId = useRef<number>(0);
   const autoTimer      = useRef<ReturnType<typeof setTimeout>>();
-  const navigateRef    = useRef(navigate);
-  const scriptBoxRef   = useRef<HTMLDivElement>(null);
-  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const preloadRef      = useRef<Promise<HTMLAudioElement | null> | null>(null);
+  const navigateRef      = useRef(navigate);
+  const scriptBoxRef     = useRef<HTMLDivElement>(null);
+  const currentAudioRef  = useRef<HTMLAudioElement | null>(null);
+  const preloadRef       = useRef<Promise<HTMLAudioElement | null> | null>(null);
+  const pausedTimeRef    = useRef<number>(0);
+  const currentWordIdxRef = useRef<number>(-1);
 
   const stopSpeech = () => {
     if (currentAudioRef.current) {
+      currentAudioRef.current.ontimeupdate = null;
+      currentAudioRef.current.onended      = null;
+      currentAudioRef.current.onerror      = null;
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
+    }
+    pausedTimeRef.current = 0;
+  };
+
+  const pauseForMute = () => {
+    if (currentAudioRef.current) {
+      pausedTimeRef.current = currentAudioRef.current.currentTime;
+      currentAudioRef.current.pause();
     }
   };
 
@@ -207,6 +221,8 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     setTourStep(step);
     tourStepRef.current = step;
     setVisible(false);
+    setCurrentWordIdx(-1);
+    currentWordIdxRef.current = -1;
 
     const text    = s.text[langRef.current];
     const isMuted = mutedRef.current;
@@ -247,8 +263,23 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
             return;
           }
           currentAudioRef.current = audio;
+
+          /* ── word-by-word highlight via timeupdate ── */
+          const words = text.split(/\s+/);
+          audio.ontimeupdate = () => {
+            if (audio.duration > 0) {
+              const idx = Math.min(
+                Math.floor((audio.currentTime / audio.duration) * words.length),
+                words.length - 1,
+              );
+              if (idx !== currentWordIdxRef.current) {
+                currentWordIdxRef.current = idx;
+                setCurrentWordIdx(idx);
+              }
+            }
+          };
+
           audio.onended = () => {
-            URL.revokeObjectURL(audio.src);
             currentAudioRef.current = null;
             cancelAnimationFrame(scrollId.current);
             if (phaseRef.current !== "tour") return;
@@ -259,7 +290,6 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
             }, 700);
           };
           audio.onerror = () => {
-            URL.revokeObjectURL(audio.src);
             currentAudioRef.current = null;
             if (phaseRef.current !== "tour") return;
             autoTimer.current = setTimeout(() => {
@@ -376,18 +406,33 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     mutedRef.current = next;
     if (phaseRef.current === "tour") {
       if (next) {
-        stopSpeech();
+        /* MUTING — pause audio (keep ref so we can resume), set timer for remaining time */
+        pauseForMute();
         clearTimeout(autoTimer.current);
-        const words = TOUR_STEPS[tourStepRef.current].text[langRef.current].split(/\s+/).length;
-        const t     = Math.max(Math.round((words / 140) * 60000), 4500);
+        const audio = currentAudioRef.current;
+        let remainingMs: number;
+        if (audio && audio.duration > 0) {
+          remainingMs = Math.max((audio.duration - pausedTimeRef.current) * 1000, 1500);
+        } else {
+          const words = TOUR_STEPS[tourStepRef.current].text[langRef.current].split(/\s+/).length;
+          remainingMs = Math.max(Math.round((words / 140) * 60000), 4500);
+        }
         autoTimer.current = setTimeout(() => {
           if (phaseRef.current !== "tour") return;
           const nx = tourStepRef.current + 1;
           if (nx >= TOUR_STEPS.length) doEndTour();
           else runStep(nx);
-        }, t);
+        }, remainingMs);
       } else {
-        runStep(tourStepRef.current);
+        /* UNMUTING — resume from where we paused, don't restart */
+        clearTimeout(autoTimer.current);
+        const audio = currentAudioRef.current;
+        if (audio) {
+          audio.play().catch(() => runStep(tourStepRef.current));
+        } else {
+          /* No audio loaded (tour started muted) — fetch and start current step */
+          runStep(tourStepRef.current);
+        }
       }
     }
   };
@@ -560,7 +605,20 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
                 className="overflow-y-auto pr-1 text-sm text-foreground leading-relaxed"
                 style={{ maxHeight: "160px" }}
               >
-                {TOUR_STEPS[tourStep].text[lang]}
+                {TOUR_STEPS[tourStep].text[lang].split(/\s+/).map((word, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      backgroundColor: i <= currentWordIdx ? "hsl(var(--primary) / 0.15)" : "transparent",
+                      color:            i <= currentWordIdx ? "hsl(var(--primary))"          : "inherit",
+                      borderRadius: "3px",
+                      padding: "0 1px",
+                      transition: "background-color 0.2s, color 0.2s",
+                    }}
+                  >
+                    {word}{" "}
+                  </span>
+                ))}
               </div>
             </div>
 
