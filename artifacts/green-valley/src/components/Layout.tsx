@@ -42,7 +42,7 @@ export const Layout = ({ children }: { children: React.ReactNode }) => {
         onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
         aria-label="Back to top"
         className={cn(
-          "fixed bottom-8 right-8 z-50 inline-flex h-12 w-12 items-center justify-center rounded-full shadow-soft transition-all duration-300",
+          "fixed bottom-8 left-8 z-50 inline-flex h-12 w-12 items-center justify-center rounded-full shadow-soft transition-all duration-300",
           "bg-primary text-primary-foreground",
           "hover:bg-primary-glow hover:scale-110 hover:shadow-lg",
           "active:scale-95",
