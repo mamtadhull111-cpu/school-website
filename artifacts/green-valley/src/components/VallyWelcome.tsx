@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronRight, Volume2, VolumeX, X } from "lucide-react";
+import { ChevronRight, Pause, Play, Volume2, VolumeX, X } from "lucide-react";
 
 const BASE_PATH = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 const robotImg  = `${BASE_PATH}/vally-robot.png`;
@@ -113,11 +113,12 @@ const WPM = 140; // words-per-minute estimate used when audio duration is unknow
 interface Props { onTourStart: () => void; onTourEnd: () => void; }
 
 export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
-  const [phase,    setPhase]    = useState<Phase>("idle");
-  const [visible,  setVisible]  = useState(false);
-  const [tourStep, setTourStep] = useState(0);
-  const [lang,     setLang]     = useState<Lang>("en");
-  const [muted,    setMuted]    = useState(false);
+  const [phase,      setPhase]      = useState<Phase>("idle");
+  const [visible,    setVisible]    = useState(false);
+  const [tourStep,   setTourStep]   = useState(0);
+  const [lang,       setLang]       = useState<Lang>("en");
+  const [muted,      setMuted]      = useState(false);
+  const [tourPaused, setTourPaused] = useState(false);
   const navigate = useNavigate();
 
   /* Refs for use inside async / rAF callbacks (avoid stale closures) */
@@ -132,7 +133,10 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
   const scriptBoxRef     = useRef<HTMLDivElement>(null);
   const currentAudioRef  = useRef<HTMLAudioElement | null>(null);
   const preloadRef       = useRef<Promise<HTMLAudioElement | null> | null>(null);
-  const pausedTimeRef = useRef<number>(0);
+  const tourPausedRef         = useRef(false);
+  const scrollProgressRef     = useRef(0);   // current page-scroll progress 0-1
+  const scriptScrollProgressRef = useRef(0); // current script-box scroll progress 0-1
+  const stepDurationMsRef     = useRef(0);   // duration of the current step
 
   const stopSpeech = () => {
     if (currentAudioRef.current) {
@@ -141,14 +145,6 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
       currentAudioRef.current.onerror      = null;
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
-    }
-    pausedTimeRef.current = 0;
-  };
-
-  const pauseForMute = () => {
-    if (currentAudioRef.current) {
-      pausedTimeRef.current = currentAudioRef.current.currentTime;
-      currentAudioRef.current.pause();
     }
   };
 
@@ -179,31 +175,36 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     cancelAnimationFrame(scriptScrollId.current);
     clearTimeout(autoTimer.current);
     stopSpeech();
+    /* Reset pause state whenever we stop everything (step change, tour end) */
+    tourPausedRef.current = false;
+    setTourPaused(false);
   };
 
-  const startScrollAnim = (durationMs: number) => {
+  /* fromProgress: 0 = start from top, 0.5 = start from midpoint, etc. */
+  const startScrollAnim = (durationMs: number, fromProgress = 0) => {
     cancelAnimationFrame(scrollId.current);
-    const t0 = Date.now();
+    const t0 = Date.now() - durationMs * fromProgress; // virtual start so progress is continuous
     const tick = () => {
       const elapsed  = Date.now() - t0;
       const progress = Math.min(elapsed / durationMs, 1);
-      const maxY     = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      scrollProgressRef.current = progress;
+      const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
       if (maxY > 0) window.scrollTo(0, maxY * progress);
       if (progress < 1) scrollId.current = requestAnimationFrame(tick);
     };
     scrollId.current = requestAnimationFrame(tick);
   };
 
-  const startScriptScrollAnim = (durationMs: number) => {
+  const startScriptScrollAnim = (durationMs: number, fromProgress = 0) => {
     cancelAnimationFrame(scriptScrollId.current);
-    /* Wait one frame so the new text is rendered and scrollHeight is correct */
     scriptScrollId.current = requestAnimationFrame(() => {
       const box = scriptBoxRef.current;
       if (!box) return;
-      const t0 = Date.now();
+      const t0 = Date.now() - durationMs * fromProgress;
       const tick = () => {
         const elapsed   = Date.now() - t0;
         const progress  = Math.min(elapsed / durationMs, 1);
+        scriptScrollProgressRef.current = progress;
         const maxScroll = box.scrollHeight - box.clientHeight;
         if (maxScroll > 0) box.scrollTop = maxScroll * progress;
         if (progress < 1) scriptScrollId.current = requestAnimationFrame(tick);
@@ -247,6 +248,10 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
         const stepDurationMs = (audio && !isNaN(audio.duration) && audio.duration > 0)
           ? audio.duration * 1000
           : Math.max(Math.round((wordCount / WPM) * 60000), 4500);
+
+        stepDurationMsRef.current    = stepDurationMs;
+        scrollProgressRef.current    = 0;
+        scriptScrollProgressRef.current = 0;
 
         /* Show tour overlay and start both scrolls with step-specific duration */
         setVisible(true);
@@ -384,40 +389,77 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
     if (phaseRef.current === "tour") runStep(tourStepRef.current);
   };
 
+  /* ── pause / resume tour ── */
+  const handlePause = () => {
+    tourPausedRef.current = true;
+    setTourPaused(true);
+    /* Freeze audio */
+    if (currentAudioRef.current) currentAudioRef.current.pause();
+    /* Freeze both scroll animations */
+    cancelAnimationFrame(scrollId.current);
+    cancelAnimationFrame(scriptScrollId.current);
+    /* Freeze auto-advance timer */
+    clearTimeout(autoTimer.current);
+  };
+
+  const handleResume = () => {
+    tourPausedRef.current = false;
+    setTourPaused(false);
+    const stepMs   = stepDurationMsRef.current;
+    const fromPage = scrollProgressRef.current;
+    const fromScrip = scriptScrollProgressRef.current;
+
+    if (!mutedRef.current) {
+      /* Resume audio from its paused position (HTMLAudioElement remembers it) */
+      currentAudioRef.current?.play().catch(() => runStep(tourStepRef.current));
+    } else {
+      /* Muted: restart the auto-advance timer for the remaining scroll time */
+      clearTimeout(autoTimer.current);
+      const remaining = Math.max(stepMs * (1 - fromPage), 800);
+      autoTimer.current = setTimeout(() => {
+        if (phaseRef.current !== "tour") return;
+        const nx = tourStepRef.current + 1;
+        if (nx >= TOUR_STEPS.length) doEndTour();
+        else runStep(nx);
+      }, remaining);
+    }
+
+    /* Resume both scrolls from exactly where they were paused */
+    startScrollAnim(stepMs, fromPage);
+    startScriptScrollAnim(stepMs, fromScrip);
+  };
+
   /* ── mute toggle ── */
   const toggleMute = () => {
     const next = !mutedRef.current;
     setMuted(next);
     mutedRef.current = next;
-    if (phaseRef.current === "tour") {
-      if (next) {
-        /* MUTING — pause audio (keep ref so we can resume), set timer for remaining time */
-        pauseForMute();
-        clearTimeout(autoTimer.current);
-        const audio = currentAudioRef.current;
-        let remainingMs: number;
-        if (audio && audio.duration > 0) {
-          remainingMs = Math.max((audio.duration - pausedTimeRef.current) * 1000, 1500);
-        } else {
-          const words = TOUR_STEPS[tourStepRef.current].text[langRef.current].split(/\s+/).length;
-          remainingMs = Math.max(Math.round((words / 140) * 60000), 4500);
-        }
-        autoTimer.current = setTimeout(() => {
-          if (phaseRef.current !== "tour") return;
-          const nx = tourStepRef.current + 1;
-          if (nx >= TOUR_STEPS.length) doEndTour();
-          else runStep(nx);
-        }, remainingMs);
-      } else {
-        /* UNMUTING — resume from where we paused, don't restart */
-        clearTimeout(autoTimer.current);
-        const audio = currentAudioRef.current;
-        if (audio) {
+    if (phaseRef.current !== "tour") return;
+
+    if (next) {
+      /* MUTING — silence audio only; scrolls keep running */
+      if (currentAudioRef.current) currentAudioRef.current.pause();
+      clearTimeout(autoTimer.current);
+      /* Auto-advance fires when the scroll finishes */
+      const remaining = Math.max(stepDurationMsRef.current * (1 - scrollProgressRef.current), 800);
+      autoTimer.current = setTimeout(() => {
+        if (phaseRef.current !== "tour") return;
+        const nx = tourStepRef.current + 1;
+        if (nx >= TOUR_STEPS.length) doEndTour();
+        else runStep(nx);
+      }, remaining);
+    } else {
+      /* UNMUTING — seek audio to where the scroll currently is, then play */
+      clearTimeout(autoTimer.current);
+      const audio = currentAudioRef.current;
+      if (audio && !isNaN(audio.duration) && audio.duration > 0) {
+        audio.currentTime = scrollProgressRef.current * audio.duration;
+        if (!tourPausedRef.current) {
           audio.play().catch(() => runStep(tourStepRef.current));
-        } else {
-          /* No audio loaded (tour started muted) — fetch and start current step */
-          runStep(tourStepRef.current);
         }
+      } else {
+        /* No audio loaded (tour started muted) — restart current step with audio */
+        runStep(tourStepRef.current);
       }
     }
   };
@@ -546,10 +588,22 @@ export const VallyWelcome = ({ onTourStart, onTourEnd }: Props) => {
                   >हिं</button>
                 </div>
 
+                {/* Pause / Resume */}
+                <button
+                  onClick={tourPaused ? handleResume : handlePause}
+                  title={tourPaused ? (lang === "hi" ? "जारी रखें" : "Resume") : (lang === "hi" ? "रोकें" : "Pause")}
+                  className="text-white/70 hover:text-white transition-colors p-0.5"
+                  aria-label={tourPaused ? "Resume tour" : "Pause tour"}
+                >
+                  {tourPaused
+                    ? <Play  className="h-4 w-4" />
+                    : <Pause className="h-4 w-4" />}
+                </button>
+
                 {/* Volume */}
                 <button
                   onClick={toggleMute}
-                  title={muted ? "Unmute" : "Mute"}
+                  title={muted ? (lang === "hi" ? "आवाज़ चालू" : "Unmute") : (lang === "hi" ? "आवाज़ बंद" : "Mute")}
                   className="text-white/70 hover:text-white transition-colors p-0.5"
                   aria-label={muted ? "Unmute Vally" : "Mute Vally"}
                 >
