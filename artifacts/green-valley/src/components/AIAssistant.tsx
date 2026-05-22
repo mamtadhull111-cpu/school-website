@@ -4,9 +4,17 @@ import { X, Send, RotateCcw, MapPin, Volume2, VolumeX } from "lucide-react";
 const BASE_PATH = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 const robotImg = `${BASE_PATH}/vally-robot.png`;
 
-interface Message { role: "user" | "assistant"; content: string; }
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  wasStreamed?: boolean; // true = arrived via SSE stream (already animated); false/absent = instant
+}
 type Lang = "en" | "hi";
 const BASE_URL = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
+
+let _mid = 0;
+const makeId = () => `m${++_mid}`;
 
 const GREETINGS: Record<Lang, string> = {
   en: "Hi! I'm Vally, your Green Valley School assistant. Ask me anything about school.",
@@ -19,6 +27,39 @@ const PLACEHOLDERS: Record<Lang, string> = {
 const SUBTITLES: Record<Lang, string> = {
   en: "Green Valley AI Assistant",
   hi: "Green Valley AI सहायक",
+};
+
+/* ── Typewriter component ── */
+const CHAR_MS = 18; // ms per character
+
+const TypewriterText = ({ text }: { text: string }) => {
+  const [shown, setShown] = useState(0);
+
+  useEffect(() => {
+    if (!text) return;
+    let i = 0;
+    setShown(0);
+    const id = setInterval(() => {
+      i++;
+      setShown(i);
+      if (i >= text.length) clearInterval(id);
+    }, CHAR_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally runs only on mount — text is stable for instant messages
+
+  const done = shown >= text.length;
+  return (
+    <>
+      {text.slice(0, shown)}
+      {!done && (
+        <span
+          className="inline-block rounded-full bg-primary/60 align-middle ml-0.5"
+          style={{ width: "2px", height: "12px", animation: "vallyBlink 0.7s step-end infinite" }}
+        />
+      )}
+    </>
+  );
 };
 
 const speakText = async (
@@ -49,7 +90,7 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
   const [open,      setOpen]      = useState(false);
   const [lang,      setLang]      = useState<Lang>("en");
   const [messages,  setMessages]  = useState<Message[]>([
-    { role: "assistant", content: GREETINGS.en },
+    { id: makeId(), role: "assistant", content: GREETINGS.en },
   ]);
   const [input,     setInput]     = useState("");
   const [loading,   setLoading]   = useState(false);
@@ -102,19 +143,23 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
   const switchLang = (l: Lang) => {
     if (l === lang) return;
     setLang(l);
-    setMessages([{ role: "assistant", content: GREETINGS[l] }]);
+    setMessages([{ id: makeId(), role: "assistant", content: GREETINGS[l] }]);
     setInput("");
   };
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
-    const newMsgs: Message[] = [...messages, { role: "user", content: text }];
+    const newMsgs: Message[] = [...messages, { id: makeId(), role: "user", content: text }];
     setMessages(newMsgs);
     setInput("");
     setLoading(true);
+
+    const streamMsgId = makeId();
     let reply = "";
-    setMessages(p => [...p, { role: "assistant", content: "" }]);
+    /* Start with empty streamed placeholder */
+    setMessages(p => [...p, { id: streamMsgId, role: "assistant", content: "", wasStreamed: true }]);
+
     try {
       const res = await fetch(`${BASE_URL}/api/chat`, {
         method: "POST",
@@ -131,8 +176,21 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
           if (!line.startsWith("data: ")) continue;
           try {
             const d = JSON.parse(line.slice(6));
-            if (d.content) { reply += d.content; setMessages(p => { const u=[...p]; u[u.length-1]={role:"assistant",content:reply}; return u; }); }
-            if (d.error)   { setMessages(p => { const u=[...p]; u[u.length-1]={role:"assistant",content:d.error}; return u; }); }
+            if (d.content) {
+              reply += d.content;
+              setMessages(p => {
+                const u = [...p];
+                u[u.length - 1] = { ...u[u.length - 1], content: reply };
+                return u;
+              });
+            }
+            if (d.error) {
+              setMessages(p => {
+                const u = [...p];
+                u[u.length - 1] = { ...u[u.length - 1], content: d.error };
+                return u;
+              });
+            }
           } catch {}
         }
       }
@@ -141,12 +199,17 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
       const err = lang === "hi"
         ? "माफ़ करें, अभी कनेक्ट नहीं हो पाया। कृपया फिर से प्रयास करें।"
         : "Sorry, I couldn't connect right now. Please try again.";
-      setMessages(p => { const u=[...p]; u[u.length-1]={role:"assistant",content:err}; return u; });
+      /* Error message is instant — no wasStreamed flag so it gets typewriter */
+      setMessages(p => {
+        const u = [...p];
+        u[u.length - 1] = { id: makeId(), role: "assistant", content: err };
+        return u;
+      });
     } finally { setLoading(false); }
   }, [input, loading, messages, lang]);
 
   const reset = () => {
-    setMessages([{ role: "assistant", content: GREETINGS[lang] }]);
+    setMessages([{ id: makeId(), role: "assistant", content: GREETINGS[lang] }]);
     setInput("");
   };
 
@@ -164,6 +227,17 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
         @keyframes vallyFloat {
           0%, 100% { transform: translateY(0px); }
           50%       { transform: translateY(-12px); }
+        }
+        @keyframes vallyBlink {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0; }
+        }
+        @keyframes vallyMsgIn {
+          from { opacity: 0; transform: translateY(8px) scale(0.97); }
+          to   { opacity: 1; transform: translateY(0)   scale(1);    }
+        }
+        .vally-msg-in {
+          animation: vallyMsgIn 0.22s cubic-bezier(0.34,1.3,0.64,1) both;
         }
       `}</style>
 
@@ -211,22 +285,59 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-2.5 bg-[#f8faf8]">
-            {messages.map((msg, i) => (
-              <div key={i} className={`flex gap-1.5 ${msg.role==="user" ? "justify-end" : "justify-start"}`}>
-                {msg.role === "assistant" && (
-                  <img src={robotImg} alt="" className="h-6 w-6 object-contain shrink-0 mt-0.5" />
-                )}
-                <div className={`max-w-[78%] rounded-2xl px-3 py-2 text-xs leading-relaxed ${msg.role==="user" ? "bg-primary text-white rounded-br-sm" : "bg-white text-foreground border border-border rounded-bl-sm shadow-sm"}`}>
-                  {msg.content || (loading && i===messages.length-1 ? (
-                    <span className="flex gap-1 items-center py-0.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:0ms]" />
-                      <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:150ms]" />
-                      <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:300ms]" />
-                    </span>
-                  ) : "")}
+            {messages.map((msg, i) => {
+              const isActiveStream = loading && i === messages.length - 1 && msg.role === "assistant";
+
+              let contentNode: React.ReactNode;
+
+              if (isActiveStream && !msg.content) {
+                /* Still waiting for first token → bouncing dots */
+                contentNode = (
+                  <span className="flex gap-1 items-center py-0.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:0ms]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:150ms]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:300ms]" />
+                  </span>
+                );
+              } else if (isActiveStream) {
+                /* Streaming in progress → show text + blinking cursor */
+                contentNode = (
+                  <>
+                    {msg.content}
+                    <span
+                      className="inline-block rounded-full bg-primary/60 align-middle ml-0.5"
+                      style={{ width: "2px", height: "12px", animation: "vallyBlink 0.7s step-end infinite" }}
+                    />
+                  </>
+                );
+              } else if (msg.role === "assistant" && !msg.wasStreamed) {
+                /* Instant assistant message → typewriter animation */
+                contentNode = <TypewriterText key={msg.id} text={msg.content} />;
+              } else {
+                /* User messages or already-streamed assistant messages → plain text */
+                contentNode = msg.content;
+              }
+
+              return (
+                <div
+                  key={msg.id}
+                  className={`flex gap-1.5 vally-msg-in ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  {msg.role === "assistant" && (
+                    <img src={robotImg} alt="" className="h-6 w-6 object-contain shrink-0 mt-0.5" />
+                  )}
+                  <div
+                    className={`max-w-[78%] rounded-2xl px-3 py-2 text-xs leading-relaxed ${
+                      msg.role === "user"
+                        ? "bg-primary text-white rounded-br-sm"
+                        : "bg-white text-foreground border border-border rounded-bl-sm shadow-sm"
+                    }`}
+                  >
+                    {contentNode}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div ref={bottomRef} />
           </div>
 
@@ -247,7 +358,7 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key==="Enter" && !e.shiftKey && sendMessage()}
+              onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()}
               placeholder={PLACEHOLDERS[lang]}
               disabled={loading}
               className="flex-1 rounded-xl border border-border bg-[#f8faf8] px-3 py-1.5 text-xs outline-none focus:border-primary focus:ring-1 focus:ring-primary/20 disabled:opacity-60 transition-colors"
