@@ -4,12 +4,7 @@ import { X, Send, RotateCcw, MapPin, Volume2, VolumeX } from "lucide-react";
 const BASE_PATH = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 const robotImg = `${BASE_PATH}/vally-robot.png`;
 
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  wasStreamed?: boolean; // true = arrived via SSE stream (already animated); false/absent = instant
-}
+interface Message { id: string; role: "user" | "assistant"; content: string; }
 type Lang = "en" | "hi";
 const BASE_URL = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 
@@ -29,16 +24,30 @@ const SUBTITLES: Record<Lang, string> = {
   hi: "Green Valley AI सहायक",
 };
 
-/* ── Typewriter component ── */
-const CHAR_MS = 18; // ms per character
+/* ─── TypewriterText ─────────────────────────────────────────────────────────
+   Animates text character-by-character on first mount.
+   On re-mounts (chat panel re-open), checks seenIdsRef so it shows instantly
+   instead of re-typing text the user has already read.
+────────────────────────────────────────────────────────────────────────────── */
+const CHAR_MS = 18;
 
-const TypewriterText = ({ text }: { text: string }) => {
-  const [shown, setShown] = useState(0);
+const TypewriterText = ({
+  text,
+  msgId,
+  seenIdsRef,
+}: {
+  text: string;
+  msgId: string;
+  seenIdsRef: React.MutableRefObject<Set<string>>;
+}) => {
+  const alreadySeen = seenIdsRef.current.has(msgId);
+  const [shown, setShown] = useState(() => (alreadySeen ? text.length : 0));
 
   useEffect(() => {
-    if (!text) return;
+    if (alreadySeen || !text) return;
+    /* Mark as seen immediately so re-mounts (chat close/open) skip animation */
+    seenIdsRef.current.add(msgId);
     let i = 0;
-    setShown(0);
     const id = setInterval(() => {
       i++;
       setShown(i);
@@ -46,7 +55,7 @@ const TypewriterText = ({ text }: { text: string }) => {
     }, CHAR_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally runs only on mount — text is stable for instant messages
+  }, []); // intentionally runs once per mount
 
   const done = shown >= text.length;
   return (
@@ -62,6 +71,7 @@ const TypewriterText = ({ text }: { text: string }) => {
   );
 };
 
+/* ─── TTS helper ─────────────────────────────────────────────────────────── */
 const speakText = async (
   text: string,
   audioRef: React.MutableRefObject<HTMLAudioElement | null>,
@@ -84,6 +94,7 @@ const speakText = async (
   } catch {}
 };
 
+/* ─── Component ─────────────────────────────────────────────────────────── */
 export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
   if (hidden) return null;
 
@@ -96,11 +107,15 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
   const [loading,   setLoading]   = useState(false);
   const [showLabel, setShowLabel] = useState(true);
   const [muted,     setMuted]     = useState(false);
-  const mutedRef    = useRef(false);
-  const bottomRef   = useRef<HTMLDivElement>(null);
-  const inputRef    = useRef<HTMLInputElement>(null);
-  const idleTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const mutedRef        = useRef(false);
+  const bottomRef       = useRef<HTMLDivElement>(null);
+  const inputRef        = useRef<HTMLInputElement>(null);
+  const idleTimer       = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  /* Tracks which message IDs have already played their typewriter animation.
+     Lives on the component instance so it persists across chat panel open/close. */
+  const seenIdsRef      = useRef(new Set<string>());
 
   useEffect(() => { mutedRef.current = muted; }, [muted]);
 
@@ -150,16 +165,17 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
   const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
+
     const newMsgs: Message[] = [...messages, { id: makeId(), role: "user", content: text }];
     setMessages(newMsgs);
     setInput("");
     setLoading(true);
 
-    const streamMsgId = makeId();
-    let reply = "";
-    /* Start with empty streamed placeholder */
-    setMessages(p => [...p, { id: streamMsgId, role: "assistant", content: "", wasStreamed: true }]);
+    /* Reserve a slot for the assistant reply (empty = shows loading dots) */
+    const replyMsgId = makeId();
+    setMessages(p => [...p, { id: replyMsgId, role: "assistant", content: "" }]);
 
+    let reply = "";
     try {
       const res = await fetch(`${BASE_URL}/api/chat`, {
         method: "POST",
@@ -169,6 +185,9 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
       const reader = res.body?.getReader();
       const dec    = new TextDecoder();
       if (!reader) throw new Error("No reader");
+
+      /* Collect the full reply in the background — set content once at the end
+         so TypewriterText gets a clean single pass over the complete text. */
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -176,36 +195,32 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
           if (!line.startsWith("data: ")) continue;
           try {
             const d = JSON.parse(line.slice(6));
-            if (d.content) {
-              reply += d.content;
-              setMessages(p => {
-                const u = [...p];
-                u[u.length - 1] = { ...u[u.length - 1], content: reply };
-                return u;
-              });
-            }
-            if (d.error) {
-              setMessages(p => {
-                const u = [...p];
-                u[u.length - 1] = { ...u[u.length - 1], content: d.error };
-                return u;
-              });
-            }
+            if (d.content) reply += d.content;
+            if (d.error)   reply  = d.error;
           } catch {}
         }
       }
+
+      /* Now set the full content — TypewriterText will animate it */
+      setMessages(p => {
+        const u = [...p];
+        u[u.length - 1] = { ...u[u.length - 1], content: reply };
+        return u;
+      });
+
       if (reply && !mutedRef.current) speakText(reply, currentAudioRef, lang);
     } catch {
       const err = lang === "hi"
         ? "माफ़ करें, अभी कनेक्ट नहीं हो पाया। कृपया फिर से प्रयास करें।"
         : "Sorry, I couldn't connect right now. Please try again.";
-      /* Error message is instant — no wasStreamed flag so it gets typewriter */
       setMessages(p => {
         const u = [...p];
-        u[u.length - 1] = { id: makeId(), role: "assistant", content: err };
+        u[u.length - 1] = { ...u[u.length - 1], content: err };
         return u;
       });
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }, [input, loading, messages, lang]);
 
   const reset = () => {
@@ -286,12 +301,13 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-2.5 bg-[#f8faf8]">
             {messages.map((msg, i) => {
-              const isActiveStream = loading && i === messages.length - 1 && msg.role === "assistant";
+              const isWaitingForReply =
+                loading && i === messages.length - 1 && msg.role === "assistant" && !msg.content;
 
               let contentNode: React.ReactNode;
 
-              if (isActiveStream && !msg.content) {
-                /* Still waiting for first token → bouncing dots */
+              if (isWaitingForReply) {
+                /* Show bouncing dots while the full reply is being collected */
                 contentNode = (
                   <span className="flex gap-1 items-center py-0.5">
                     <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:0ms]" />
@@ -299,22 +315,17 @@ export const AIAssistant = ({ hidden = false }: { hidden?: boolean }) => {
                     <span className="h-1.5 w-1.5 rounded-full bg-primary/50 animate-bounce [animation-delay:300ms]" />
                   </span>
                 );
-              } else if (isActiveStream) {
-                /* Streaming in progress → show text + blinking cursor */
+              } else if (msg.role === "assistant" && msg.content) {
+                /* Every completed assistant message gets the typewriter animation.
+                   seenIdsRef prevents re-animation when the panel is closed & reopened. */
                 contentNode = (
-                  <>
-                    {msg.content}
-                    <span
-                      className="inline-block rounded-full bg-primary/60 align-middle ml-0.5"
-                      style={{ width: "2px", height: "12px", animation: "vallyBlink 0.7s step-end infinite" }}
-                    />
-                  </>
+                  <TypewriterText
+                    text={msg.content}
+                    msgId={msg.id}
+                    seenIdsRef={seenIdsRef}
+                  />
                 );
-              } else if (msg.role === "assistant" && !msg.wasStreamed) {
-                /* Instant assistant message → typewriter animation */
-                contentNode = <TypewriterText key={msg.id} text={msg.content} />;
               } else {
-                /* User messages or already-streamed assistant messages → plain text */
                 contentNode = msg.content;
               }
 
