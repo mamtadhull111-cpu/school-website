@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 declare const process: { env: Record<string, string | undefined> };
+declare function fetch(input: any, init?: any): Promise<any>;
 
 const GROQ_API_KEY = process.env["GROQ_API_KEY"] ?? "";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
@@ -153,7 +154,7 @@ export default async function handler(req: any, res: any) {
 
     const chatMessages = [
       { role: "system" as const, content: systemPrompt },
-      ...messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+      ...messages.map((m: any) => ({ role: m.role as string, content: m.content as string })),
     ];
 
     const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
