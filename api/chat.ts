@@ -1,6 +1,7 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+declare const process: { env: Record<string, string | undefined> };
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY ?? "";
+const GROQ_API_KEY = process.env["GROQ_API_KEY"] ?? "";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 const SCHOOL_FACTS = `
@@ -125,11 +126,7 @@ const SYSTEM_HI = `आप Vally हैं, Green Valley Public School, Pai, Kait
 स्कूल की जानकारी:
 ${SCHOOL_FACTS}`;
 
-interface RequestWithBody extends IncomingMessage {
-  body?: { messages?: { role: string; content: string }[]; lang?: "en" | "hi" };
-}
-
-export default async function handler(req: RequestWithBody, res: ServerResponse) {
+export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
